@@ -2,164 +2,160 @@ package thymeleaf;
 
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+import org.jsoup.parser.Tag;
+import org.jsoup.select.Elements;
 
 import java.io.*;
 import java.lang.reflect.Field;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 public class Template {
-    BufferedReader templateReader;
-    StringBuilder html;
+    Document template;
 
-    String ifOrUnlessValue = null;
+    private static Document resultHtml = null;
+
+    private static TemplateContext context;
 
     public Template(String template) {
         try {
-            this.templateReader = new BufferedReader(new FileReader(template));
+            this.template = Jsoup.parse(new File(template));
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
 
     public void render(TemplateContext ctx, PrintWriter out) throws Exception {
-        html = new StringBuilder();
+        resultHtml = template.clone();
+        context = ctx;
+        r();
 
-        String line = templateReader.readLine();
-        while (line != null) {
-            if (line.contains("t:text")) {
-                setText(line, ctx);
-            } else if (line.contains("t:each")) {
-                setForEach(line, ctx);
-            } else {
-                html.append(line).append("\n");
-            }
-
-            line = templateReader.readLine();
-        }
-        saveToFile(out, html.toString());
-    }
-
-    private void setIf(String line, Object o, Class<?> cl) throws Exception {
-        int start = line.indexOf(".") + 1;
-        int end = line.indexOf("}");
-        String fieldName = line.substring(start, end);
-        Field f = cl.getDeclaredField(fieldName);
-
-        start = line.indexOf("==") + 4;
-        end = line.indexOf("'\"");
-        Object searchValue = line.substring(start, end);
-        Object fieldValue = String.valueOf(f.get(o));
-
-        start = line.indexOf("t:text=\"") + 8;
-        end = line.indexOf("\"", start + 1);
-        String res = line.substring(start, end);
-
-        if (searchValue.equals(fieldValue)) {
-            ifOrUnlessValue = res;
-            html.append(res);
-        }
-    }
-
-    private void setUnless(String line, Object o, Class<?> cl) throws Exception {
-        int start = line.indexOf(".") + 1;
-        int end = line.indexOf("}");
-        String fieldName = line.substring(start, end);
-        Field f = cl.getDeclaredField(fieldName);
-
-        start = line.indexOf("==") + 4;
-        end = line.indexOf("'\"");
-        Object searchValue = line.substring(start, end);
-        Object fieldValue = String.valueOf(f.get(o));
-
-        start = line.indexOf("t:text=\"") + 8;
-        end = line.indexOf("\"", start + 1);
-        String res = line.substring(start, end);
-
-        if (!searchValue.equals(fieldValue)) {
-            html.append(res);
-        }
-    }
-
-    private void setForEach(String line, TemplateContext ctx) throws Exception {
-        int start = line.indexOf("t:each");
-        String tr = line.substring(0, start - 1) + ">";
-
-        String searchKey = handelLine(line, start);
-
-        Object[] classes = ctx.classes.get(searchKey);
-
-        List<String> lines = new ArrayList<>();
-        line = templateReader.readLine();
-        while (!line.contains("</tr>")) {
-            lines.add(line);
-            line = templateReader.readLine();
-        }
-
-        for (Object o : classes) {
-            html.append(tr).append("\n");
-            Class<?> cl = o.getClass();
-
-            for (String l : lines) {
-                if (l.contains("t:if")) {
-                    setIf(l, o, cl);
-                    continue;
-                } else if (l.contains("t:unless")) {
-                    if (ifOrUnlessValue == null) {
-                        setUnless(l, o, cl);
-                        continue;
-                    }
-
-                    ifOrUnlessValue = null;
-                    continue;
-                }
-
-                if (l.contains("<td>") || l.contains("</td>")) {
-                    html.append(l.contains("</td>") ? l + "\n" : l);
-                    continue;
-                }
-
-                String fieldName = setText(l, ctx);
-                Field f = cl.getDeclaredField(fieldName);
-                html.append(f.get(o)).append("</td>").append("\n");
-            }
-            html.append("</tr>").append("\n");
-        }
-    }
-
-    private static String handelLine(String line, int start) {
-        start += 8;
-        int end = line.indexOf(":", start);
-        //String key = line.substring(start, end);
-
-        start = line.indexOf("{");
-        end = line.indexOf("}\"");
-
-        return line.substring(start + 1, end);
-    }
-
-    private String setText(String line, TemplateContext ctx) {
-        int start = line.indexOf("t:text");
-        html.append(line.substring(0, start)).append(">");
-
-        start += 8;
-        int end = line.indexOf("}\"");
-        String placeholder = line.substring(start, end);
-
-        if (placeholder.contains("#")) {
-            String[] values = placeholder.substring(2).split("\\.");
-            String res = ctx.welcomeMessages.get(values[0]);
-            html.append(res).append("</span>");
-        }
-
-        String[] values = placeholder.substring(2).split("\\.");
-        return values[1];
-    }
-
-    private static void saveToFile(PrintWriter out, String html) {
-        Document doc = Jsoup.parse(html);
-        out.print(doc);
-        out.flush();
+        out.print(resultHtml);
         out.close();
+    }
+
+    private static void r() throws Exception {
+        Elements ifElements = resultHtml.getElementsByAttribute("t:if");
+        for (Element e : ifElements) {
+            setIf(e);
+        }
+
+        Elements eachElements = resultHtml.getElementsByAttribute("t:each");
+        for (Element e : eachElements) {
+            List<?> list = getList(e);
+
+            Element parentElement = e.parent();
+            Elements children = e.children();
+            Tag tag = e.tag();
+            e.remove();
+
+            setEach(list, parentElement, children, tag);
+        }
+
+        Elements textElements = resultHtml.getElementsByAttribute("t:text");
+        for (Element e : textElements) {
+            if (e.attr("t:text").contains("#")) {
+                String text = e.attr("t:text");
+                String res = getResultText(text, null);
+
+                e.removeAttr("t:text");
+                e.append(res);
+            }
+        }
+    }
+
+    private static void setIf(Element e) throws Exception {
+        String text = e.attr("t:if");
+        String res = getResultText(text, null);
+
+        //example: ${student.gender} == 'm'
+        int start = text.indexOf("== ");
+        String ifCondition = text.substring(start + 4, text.length() - 1);
+
+        if (res.equals(ifCondition)) {
+            setIfOrUnlessResult(e, "t:if");
+            return;
+        }
+        if (!e.nextElementSibling().hasAttr("t:unless")) {
+            e.remove();
+            return;
+        }
+
+        Element unlessElement = e.nextElementSibling();
+        String textUnless = unlessElement.attr("t:unless");
+        String resUnless = getResultText(textUnless, null);
+
+        //example: ${student.gender} == 'm'
+        start = textUnless.indexOf("== ");
+        String ifConditionUnless = textUnless.substring(start + 4, text.length() - 1);
+
+        if (!resUnless.equals(ifConditionUnless)) {
+            setIfOrUnlessResult(unlessElement, "t:unless");
+            e.remove();
+            return;
+        }
+        unlessElement.remove();
+        e.remove();
+    }
+
+    private static void setIfOrUnlessResult(Element element, String attributeKey) {
+        String resText = element.attr("t:text");
+        element.append(resText);
+        element.removeAttr("t:text");
+        element.removeAttr(attributeKey);
+    }
+
+    private static void setEach(List<?> list, Element parentElement, Elements children, Tag elementTag) throws Exception {
+        for (Object classObject : list) {
+            Element newElement = new Element(elementTag.toString());
+            parentElement.appendChild(newElement);
+
+            for (Element child : children) {
+                Tag tag = child.tag();
+                Element newChildElement = new Element(tag.toString());
+                newElement.appendChild(newChildElement);
+                r();
+
+                String text = child.attr("t:text");
+                String res = getResultText(text, classObject);
+
+                newChildElement.append(res);
+            }
+        }
+    }
+
+    private static List<?> getList(Element e) {
+        String text = e.attr("t:each");
+
+        //example: student: ${students}
+        int start = text.indexOf("${");
+        String key = text.substring(start + 2, text.length() - 1);
+
+        Object ob = context.classes.get(key);
+
+        if (!ob.getClass().isArray())
+            throw new IllegalArgumentException("Each uses array");
+
+        return Arrays.asList((Object[]) ob);
+    }
+
+    private static String getResultText(String text, Object o) throws Exception {
+        int dotIndex = text.indexOf(".");
+        int end = text.indexOf("}");
+
+        //example: #{welcome.message}
+        String key = text.substring(2, dotIndex);
+        String fieldName = text.substring(dotIndex + 1, end);
+
+        if (o != null) {
+            Field f = o.getClass().getField(fieldName);
+            return String.valueOf(f.get(o));
+        }
+
+        Object cl = context.classes.get(key);
+        Field f = cl.getClass().getField(fieldName);
+
+        return String.valueOf(f.get(cl));
     }
 }
